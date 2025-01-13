@@ -3,10 +3,12 @@
 
 import networkx as nx
 import numpy as np
+
+from topsearch.data.kinetic_transition_network import KineticTransitionNetwork
 from .minima_properties import get_minima_energies
 
 
-def unconnected_component(ktn: type) -> set:
+def unconnected_component(ktn: KineticTransitionNetwork) -> set:
     """ Check which minima are not connected to the global minimum.
         Return the set of minima that are unconnected """
 
@@ -19,17 +21,17 @@ def unconnected_component(ktn: type) -> set:
     return unconnected_set
 
 
-def are_nodes_connected(ktn: type, node_i: int, node_j: int) -> bool:
+def are_nodes_connected(ktn: KineticTransitionNetwork, node_i: int, node_j: int) -> bool:
     """ Check if two minima are connected in a given graph """
     return bool(node_j in nx.node_connected_component(ktn.G, node_i))
 
 
-def all_minima_connected(ktn: type) -> bool:
+def all_minima_connected(ktn: KineticTransitionNetwork) -> bool:
     """ Wrapper for checking if the graph is fully connected """
     return nx.is_connected(ktn.G)
 
 
-def get_connections(ktn: type, min_node: int) -> list:
+def get_connections(ktn: KineticTransitionNetwork, min_node: int) -> list:
     """ Find the transition states directly connected to a given node """
     transition_states = []
     for i in ktn.G.edges(min_node):
@@ -40,7 +42,7 @@ def get_connections(ktn: type, min_node: int) -> list:
     return transition_states
 
 
-def disconnected_height(ktn: type, node_i: int, node_j: int,
+def disconnected_height(ktn: KineticTransitionNetwork, node_i: int, node_j: int,
                         max_ts_energy: float, e_range: float) -> float:
     """ Return the height at which two nodes become disconnected """
     # Create a graph copy
@@ -60,10 +62,10 @@ def disconnected_height(ktn: type, node_i: int, node_j: int,
     return 1e10
 
 
-def remove_edges_threshold(H: nx.Graph, energy1: float) -> nx.Graph:
+def remove_edges_threshold(H: nx.MultiGraph, energy1: float) -> nx.MultiGraph:
     """ Remove any transition states that have an energy above energy1 """
-    for u, v in H.edges():
-        ts_energy = H[u][v]['energy']
+    for u, v, edge_index in list(H.edges): #list() is needed as we need a copy of the edges list, otherwise we'd modify the dictionary H as we're iterating through it
+        ts_energy = H[u][v][edge_index]['energy']
         if ts_energy > energy1:
-            H.remove_edge(u, v)
+            H.remove_edge(u, v, edge_index)
     return H

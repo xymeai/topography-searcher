@@ -7,6 +7,14 @@ import multiprocessing
 from copy import deepcopy
 import numpy as np
 from nptyping import NDArray
+from topsearch.data.coordinates import StandardCoordinates
+
+from topsearch.data.kinetic_transition_network import KineticTransitionNetwork
+from topsearch.global_optimisation.basin_hopping import BasinHopping
+from topsearch.potentials.potential import Potential
+from topsearch.similarity.similarity import StandardSimilarity
+from topsearch.transition_states.hybrid_eigenvector_following import HybridEigenvectorFollowing
+from topsearch.transition_states.nudged_elastic_band import NudgedElasticBand
 from ..analysis.pair_selection import connect_unconnected, \
     closest_enumeration, read_pairs
 from ..analysis.minima_properties import get_invalid_minima, \
@@ -53,14 +61,14 @@ class NetworkSampling:
     """
 
     def __init__(self,
-                 ktn: type,
-                 coords: type,
-                 global_optimiser: type,
-                 single_ended_search: type,
-                 double_ended_search: type,
-                 similarity: type,
+                 ktn: KineticTransitionNetwork,
+                 coords: StandardCoordinates,
+                 global_optimiser: BasinHopping,
+                 single_ended_search: HybridEigenvectorFollowing,
+                 double_ended_search: NudgedElasticBand,
+                 similarity: StandardSimilarity,
                  multiprocessing_on: bool = False,
-                 n_processes: int = None,
+                 n_processes: int = 0,
                  output_level: int = 0) -> None:
         self.ktn = ktn
         self.coords = coords
@@ -74,7 +82,7 @@ class NetworkSampling:
 
     # OVERALL LANDSCAPE EXPLORATION
 
-    def get_minima(self, coords: type, n_steps: int, conv_crit: float,
+    def get_minima(self, coords: StandardCoordinates, n_steps: int, conv_crit: float,
                    temperature: float, test_valid: bool = True) -> None:
         """ Perform global optimisation to locate low-valued minima """
         self.global_optimiser.run(coords=coords, n_steps=n_steps,
@@ -139,15 +147,19 @@ class NetworkSampling:
         else:
             # Run connection attempts for each pair
             for i in total_pairs:
-                stationary_point_information = self.connection_attempt(i)
-                # For each transition state attempt to add to network
-                if stationary_point_information is not None:
-                    for j in stationary_point_information:
-                        self.coords.position = j[0]
-                        self.similarity.test_new_ts(self.ktn,
-                                                    self.coords, j[1],
-                                                    j[2], j[3],
-                                                    j[4], j[5])
+                try:
+                    stationary_point_information = self.connection_attempt(i)
+                    # For each transition state attempt to add to network
+                    if stationary_point_information is not None:
+                        for j in stationary_point_information:
+                            self.coords.position = j[0]
+                            self.similarity.test_new_ts(self.ktn,
+                                                        self.coords, j[1],
+                                                        j[2], j[3],
+                                                        j[4], j[5])
+                except:
+                    print("Failed on finding TS for ", i)
+                    traceback.print_exc()
         # Write node pairs into pairlist to keep track of previous attempts
         if self.ktn.pairlist.size == 0:
             self.ktn.pairlist = np.empty((0, 2), dtype=int)
@@ -189,7 +201,7 @@ class NetworkSampling:
         for ts_search_number, ts_candidate in enumerate(positions, start=1):
             local_coords.position = ts_candidate
             ts_coords, e_ts, min_plus, e_plus, min_minus, e_minus, neg_eig = \
-                self.single_ended_search.run(local_coords, tag=ts_search_number)
+                self.single_ended_search.run(local_coords, tag=f"{pair[0]}-{pair[1]}")
             # Check search was successful
             if ts_coords is not None:
                 with open('logfile', 'a', encoding="utf-8") as outfile:
@@ -217,7 +229,7 @@ class NetworkSampling:
                           f"NEB ({neb_length}), HEF ({hef_length})\n")
             outfile.write('-------------------------\n')
 
-    def prepare_connection_attempt(self, coords: type, pair: list) -> NDArray:
+    def prepare_connection_attempt(self, coords: StandardCoordinates, pair: list) -> NDArray:
         """ Prepare the two minima for connection in a double ended
             transition state search. Find the coordinates of each
             minimum. Check that the pair is valid and how many times
@@ -242,7 +254,7 @@ class NetworkSampling:
             self.similarity.optimal_alignment(coords, min2)
         return min1, min2, repeats, permutation
 
-    def check_pair(self, node1: int, node2: int) -> (bool, int):
+    def check_pair(self, node1: int, node2: int) -> tuple[bool, int]:
         """ Determines if a connection between this pair should be tried again.
             Could have already been attempted too many times or
             already have a transition state. Return logical
@@ -291,7 +303,7 @@ class NetworkSampling:
             elif self.single_ended_search.failure == 'invalid_ts':
                 outfile.write("Invalid transition state\n")
 
-    def select_minima(self, coords: type, option: str,
+    def select_minima(self, coords: StandardCoordinates, option: str,
                       neighbours: int) -> list:
         """
         Make decisions about which pairs of minima we should be connecting.
@@ -328,7 +340,8 @@ class NetworkSampling:
             pairs = read_pairs()
         return pairs
 
-    def reconverge_minima(self, potential: type, reconv_crit: float) -> None:
+
+    def reconverge_minima(self, potential: Potential, reconv_crit: float) -> None:
         """ Reconverge the minima we have found in ktn, allows for higher
             accuracy after running basin-hopping """
 
@@ -359,7 +372,7 @@ class NetworkSampling:
                           f"reconvergence\nReconvergence completed in "
                           f"{end_time - start_time}\n\n")
 
-    def reconverge_landscape(self, potential: type,
+    def reconverge_landscape(self, potential: Potential,
                              reconv_crit: float) -> None:
         """ Reconverge all stationary points in a landscape. Useful
             for finding the corresponding points in a different potential """
@@ -370,8 +383,8 @@ class NetworkSampling:
         ts_coordinates = []
         for i in range(self.ktn.n_minima):
             min_coordinates.append(self.ktn.get_minimum_coords(i))
-        for u, v in self.ktn.G.edges():
-            ts_coordinates.append(self.ktn.get_ts_coords(u, v))
+        for u, v, edge_index in self.ktn.G.edges:
+            ts_coordinates.append(self.ktn.get_ts_coords(u, v, edge_index))
         # Reoptimise all the minima
         minima_information = []
         for minimum in min_coordinates:

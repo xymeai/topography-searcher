@@ -2,9 +2,18 @@
     methods for storing and extracting stationary point information
     encoded as a network graph """
 
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
 import networkx as nx
 import numpy as np
 from nptyping import NDArray
+import traceback
+
+from topsearch.data.coordinates import StandardCoordinates
+
+if TYPE_CHECKING:
+    from topsearch.similarity.similarity import StandardSimilarity
 
 
 class KineticTransitionNetwork:
@@ -35,7 +44,7 @@ class KineticTransitionNetwork:
     """
 
     def __init__(self) -> None:
-        self.G = nx.Graph()
+        self.G = nx.MultiGraph()
         self.n_minima = 0
         self.n_ts = 0
         self.pairlist = np.empty((0, 2), dtype=int)
@@ -43,21 +52,21 @@ class KineticTransitionNetwork:
         with open('logfile', 'w', encoding="utf-8") as outfile:
             outfile.write(' ')
 
-    def get_minimum_coords(self, minimum: int) -> None:
+    def get_minimum_coords(self, minimum: int) -> NDArray:
         """ Returns the coordinates of a given node minimum """
         return self.G.nodes[minimum]['coords']
 
-    def get_minimum_energy(self, minimum: int) -> None:
+    def get_minimum_energy(self, minimum: int) -> float:
         """ Returns the energy of a given node minimum """
         return self.G.nodes[minimum]['energy']
 
-    def get_ts_coords(self, min_plus: int, min_minus: int) -> None:
-        """ Returns coordinates of ts edge between min_plus and min_minus """
-        return self.G[min_plus][min_minus]['coords']
+    def get_ts_coords(self, min_plus: int, min_minus: int, edge_index: int = 0) -> NDArray:
+        """ Returns coordinates of edge_index-th ts edge between min_plus and min_minus """
+        return self.G[min_plus][min_minus][edge_index]['coords']
 
-    def get_ts_energy(self, min_plus: int, min_minus: int) -> None:
-        """ Returns energy of ts edge between min_plus and min_minus """
-        return self.G[min_plus][min_minus]['energy']
+    def get_ts_energy(self, min_plus: int, min_minus: int, edge_index: int = 0) -> float:
+        """ Returns energy of edge_index-th ts edge between min_plus and min_minus """
+        return self.G[min_plus][min_minus][edge_index]['energy']
 
     def add_minimum(self, min_coords: NDArray, energy: float) -> None:
         """ Add a node to the network with data for the minimum """
@@ -86,26 +95,40 @@ class KineticTransitionNetwork:
         self.G.remove_node(self.n_minima)
         self.n_minima -= 1
 
-    def remove_minima(self, minima: NDArray) -> None:
+    def remove_minima(self, minima: list[int]) -> None:
         """ Remove the nodes with the given indices in removed_minima """
         for c, i in enumerate(np.sort(minima), 0):
             self.remove_minimum(i-c)
 
-    def remove_ts(self, minimum1: int, minimum2: int) -> None:
-        """ Remove the transition state connected the two passed minima """
-        self.G.remove_edge(minimum1, minimum2)
+    def remove_ts(self, minimum1: int, minimum2: int, edge_index: int = -1) -> None:
+        """ Remove the edge_index-th transition state connecting the two passed minima 
+            If edge_index is not passed, or is equal to -1, will remove the latest TS added"""
+        if edge_index==-1:
+            edge_index = None
+        self.G.remove_edge(minimum1, minimum2, edge_index)
         self.n_ts -= 1
+
+    def remove_all_ts(self, minimum1: int, minimum2: int) -> None:
+        """ Removes all transition states connecting the two passed minima"""
+        while self.G.number_of_edges(minimum1,minimum2):
+            self.G.remove_edge(minimum1, minimum2)
+            self.n_ts -= 1
 
     def remove_tss(self, minima: list) -> None:
         """ Remove an array of transition states in one go """
         for i in minima:
             self.remove_ts(i[0], i[1])
 
+    def remove_all_tss(self, minima: list) -> None:
+        """ Remove all transition states between minima in one go """
+        for i in minima:
+            self.remove_all_ts(i[0], i[1])
+
     #  INPUT/OUTPUT FUNCTIONS
 
     def reset_network(self) -> None:
         """ Empty the network """
-        self.G = nx.Graph()
+        self.G = nx.MultiGraph()
         self.n_minima = 0
         self.n_ts = 0
         self.pairlist = np.empty((0, 2), dtype=int)
@@ -123,19 +146,22 @@ class KineticTransitionNetwork:
         minima_data = np.empty((0, 2), dtype=object)
         minima_coords = np.empty((0, ndim), dtype=object)
         for i in range(self.n_minima):
+            e = self.G.nodes[i]['energy']
+            if not hasattr(e, '__iter__'):
+                    e = [e]
             minima_data = np.append(
-                minima_data, [[i, self.G.nodes[i]['energy']]], axis=0)
+                minima_data, [[i, e[0]]], axis=0)
             minima_coords = np.append(
                 minima_coords, [self.G.nodes[i]['coords']], axis=0)
         # Get transition state data out of the network
         ts_data = np.empty((0, 3), dtype=object)
         ts_coords = np.empty((0, ndim), dtype=object)
-        for node1, node2 in self.G.edges():
+        for node1, node2, edge_idx in self.G.edges:
             ts_data = np.append(
                 ts_data,
-                [[node1, node2, self.G[node1][node2]['energy']]], axis=0)
+                [[node1, node2, self.G[node1][node2][edge_idx]['energy']]], axis=0)
             ts_coords = np.append(
-                ts_coords, [self.G[node1][node2]['coords']], axis=0)
+                ts_coords, [self.G[node1][node2][edge_idx]['coords']], axis=0)
         # Write stationary point data and pairlist
         np.savetxt(f"ts.data{text_string}",
                    ts_data, fmt='%i %i %8.5f')
@@ -149,10 +175,10 @@ class KineticTransitionNetwork:
         """ Returns G network from files that resulted from dump_network """
 
         # Get the data back from files
-        minima_data = np.loadtxt(f"{text_path}min.data{text_string}")
-        minima_coords = np.loadtxt(f"{text_path}min.coords{text_string}")
-        ts_data = np.loadtxt(f"{text_path}ts.data{text_string}")
-        ts_coords = np.loadtxt(f"{text_path}ts.coords{text_string}")
+        minima_data = np.loadtxt(f"{text_path}min.data{text_string}", ndmin=2)
+        minima_coords = np.loadtxt(f"{text_path}min.coords{text_string}", ndmin=2)
+        ts_data = np.loadtxt(f"{text_path}ts.data{text_string}", ndmin=2)
+        ts_coords = np.loadtxt(f"{text_path}ts.coords{text_string}", ndmin=2)
         self.pairlist = np.loadtxt(f"{text_path}pairlist{text_string}",
                                    ndmin=2, dtype=int)
 
@@ -178,8 +204,8 @@ class KineticTransitionNetwork:
                 csv_file.write(f'{coords}, ')
                 csv_file.write(f'{energy}\n')
 
-    def add_network(self, other_ktn: type, similarity: type,
-                    coords: type) -> None:
+    def add_network(self, other_ktn: KineticTransitionNetwork, similarity: StandardSimilarity,
+                    coords: StandardCoordinates) -> None:
         """ Method to combine a second network with the current one.
             Compares all stationary points in other_ktn and adds any
             non-repeats to the current network """
@@ -190,9 +216,9 @@ class KineticTransitionNetwork:
             energy = other_ktn.get_minimum_energy(i)
             similarity.test_new_minimum(self, coords, energy)
         # Loop over all TSs and test if new or not
-        for u, v in other_ktn.G.edges():
-            coords.position = other_ktn.get_ts_coords(u, v)
-            ts_energy = other_ktn.get_ts_energy(u, v)
+        for u, v, edge_idx in other_ktn.G.edges:
+            coords.position = other_ktn.get_ts_coords(u, v, edge_idx)
+            ts_energy = other_ktn.get_ts_energy(u, v, edge_idx)
             min1_coords = other_ktn.get_minimum_coords(u)
             min1_energy = other_ktn.get_minimum_energy(u)
             min2_coords = other_ktn.get_minimum_coords(v)
